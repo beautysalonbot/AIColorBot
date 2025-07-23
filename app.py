@@ -142,9 +142,16 @@ def callback():
 
     # 何も該当しない場合
     return "OK", 200
+# ---------- ここまで既存の本物の callback() がある ----------
+
+# ---------- 追加：LINE Verify 用 GET ----------
+@app.route("/callback", methods=["GET"])
+def health_check():
+    return "OK", 200
+
 
 # ====================================================================
 if __name__ == "__main__":
     import os
-    port = int(os.environ.get("PORT", 5000))  # ← Render が渡す $PORT を取得
+    port = int(os.environ.get("PORT", 5000))  # Render は $PORT、ローカルは 5000
     app.run(host="0.0.0.0", port=port)
