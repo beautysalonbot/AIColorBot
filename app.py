@@ -3,22 +3,23 @@ from flask import Flask, request, abort
 from linebot import LineBotApi, WebhookParser
 from linebot.models import (
     MessageEvent, ImageMessage, TextMessage, TextSendMessage,
-    QuickReply, QuickReplyButton, MessageAction
+    QuickReply, QuickReplyButton, MessageAction,
 )
 from dotenv import load_dotenv
 import os, sys, traceback, cv2, numpy as np, pandas as pd
 from sklearn.neighbors import NearestNeighbors
 from collections import defaultdict
-import openai
+from openai import OpenAI
 
 # ---------- env 読み込み ----------
 load_dotenv()
 CHANNEL_SECRET       = os.getenv("CHANNEL_SECRET")
 CHANNEL_ACCESS_TOKEN = os.getenv("CHANNEL_ACCESS_TOKEN")
-openai.api_key       = os.getenv("OPENAI_API_KEY")
+OPENAI_API_KEY       = os.getenv("OPENAI_API_KEY")
+print("Loaded env:", CHANNEL_SECRET[:5] if CHANNEL_SECRET else "None", OPENAI_API_KEY[:5] if OPENAI_API_KEY else "None")
 
-print("Loaded env:", CHANNEL_SECRET[:5] if CHANNEL_SECRET else "None",
-      openai.api_key[:5] if openai.api_key else "None")
+# ---------- OpenAI クライアント ----------
+client = OpenAI(api_key=OPENAI_API_KEY)
 
 # ---------- LINE 初期化 ----------
 app          = Flask(__name__)
@@ -69,77 +70,70 @@ def callback():
             st   = user_state.get(uid, {})
 
             # --- LV 受付 ---
-            if st.get("step")=="ask_lv":
+            if st.get("step") == "ask_lv":
                 try:
                     lv = int(text)
-                    if not 0<=lv<=19: raise ValueError
+                    if not 0 <= lv <= 19:
+                        raise ValueError
                 except ValueError:
-                    line_bot_api.reply_message(
-                        ev.reply_token,
-                        TextSendMessage(text="0〜19 の数字で送ってください❗")
-                    )
-                    return "OK",200
+                    line_bot_api.reply_message(ev.reply_token, TextSendMessage(text="0〜19 の数字で送ってください❗"))
+                    return "OK", 200
 
-                st["lv"]=lv; st["step"]="ask_hist"
+                st["lv"] = lv
+                st["step"] = "ask_hist"
                 quick = QuickReply(items=[
                     QuickReplyButton(action=MessageAction(label="ブリーチなし", text="HIST:0")),
                     QuickReplyButton(action=MessageAction(label="ブリーチ1回", text="HIST:1")),
                     QuickReplyButton(action=MessageAction(label="ブリーチ2回", text="HIST:2")),
                     QuickReplyButton(action=MessageAction(label="縮毛あり",   text="HIST:S")),
                 ])
-                line_bot_api.reply_message(
-                    ev.reply_token,
-                    TextSendMessage(text="ブリーチや縮毛の履歴は？", quick_reply=quick)
-                )
+                line_bot_api.reply_message(ev.reply_token, TextSendMessage(text="ブリーチや縮毛の履歴は？", quick_reply=quick))
                 print("📝 lv recv:", lv)
-                return "OK",200
+                return "OK", 200
 
             # --- 履歴受付 & GPT ---
-            if text.startswith("HIST:") and st.get("step")=="ask_hist":
+            if text.startswith("HIST:") and st.get("step") == "ask_hist":
                 hist = text.split(":")[1]
-                lv   = st["lv"]; lab = extract_lab(st["img"])
+                lv   = st["lv"]
+                lab  = extract_lab(st["img"])
 
-                df["lv_diff"]  = (df["L"]-lv*12).abs()
-                df["hist_pen"] = (df["formula"].str.contains("6%")&(hist=="S")).astype(int)
-                df["score"]    = df["lv_diff"]*0.5 + df["hist_pen"]*10
-                top3 = df.nsmallest(3,"score")
+                df["lv_diff"]  = (df["L"] - lv * 12).abs()
+                df["hist_pen"] = (df["formula"].str.contains("6%") & (hist == "S")).astype(int)
+                df["score"]    = df["lv_diff"] * 0.5 + df["hist_pen"] * 10
+                top3 = df.nsmallest(3, "score")
 
-                replies=[]
+                replies = []
                 for r in top3.itertuples():
-                    prompt=(f"以下のヘアカラー処方を美容師らしく一言で解説して。\n"
-                            f"処方: {r.formula}\n40文字以内、日本語。")
+                    prompt = (f"以下のヘアカラー処方を美容師らしく一言で解説して。\n"
+                              f"処方: {r.formula}\n40文字以内、日本語。")
                     try:
-                        rsp=openai.ChatCompletion.create(
+                        rsp = client.chat.completions.create(
                             model="gpt-4o-mini",
-                            messages=[{"role":"user","content":prompt}],
-                            max_tokens=60,temperature=0.7
+                            messages=[{"role": "user", "content": prompt}],
+                            max_tokens=60,
+                            temperature=0.7,
                         )
-                        comment=rsp.choices[0].message.content.strip()
-
+                        comment = rsp.choices[0].message.content.strip()
                     except Exception as e:
-                        print("GPT Error:",type(e).__name__,"-",e,file=sys.stderr)
+                        print("GPT Error:", type(e).__name__, "-", e, file=sys.stderr)
                         traceback.print_exc()
-                        comment="(解説取得エラー)"
+                        comment = "(解説取得エラー)"
 
                     replies.append(f"{r.name}\n{r.formula}\n{comment}")
 
-                line_bot_api.reply_message(
-                    ev.reply_token,
-                    TextSendMessage(text="\n\n".join(replies))
-                )
+                line_bot_api.reply_message(ev.reply_token, TextSendMessage(text="\n\n".join(replies)))
                 print("✅ done:", uid)
-                user_state.pop(uid,None)
-                return "OK",200
+                user_state.pop(uid, None)
+                return "OK", 200
 
-    return "OK",200   # fallback
+    return "OK", 200
 
 # ---------- Verify 用 GET ----------
 @app.route("/callback", methods=["GET"])
 def health_check():
-    return "OK",200
+    return "OK", 200
 
 # ---------- 起動 ----------
-if __name__=="__main__":
-    port=int(os.environ.get("PORT",5000))
-    app.run(host="0.0.0.0",port=port)
-# ================================================================
+if __name__ == "__main__":
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host="0.0.0.0", port=port)
