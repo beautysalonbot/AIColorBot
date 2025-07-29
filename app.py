@@ -7,8 +7,9 @@ from linebot.v3.messaging import (
     ReplyMessageRequest, TextMessage, FlexMessage,
     QuickReply, QuickReplyItem, MessageAction
 )
-from linebot.v3.messaging.flex import (
-    FlexContainer, ImageComponent, BoxComponent, TextComponent
+from linebot.v3.messaging.models import (
+    FlexContainer, ImageComponent, BoxComponent, TextComponent,
+    BubbleContainer, CarouselContainer
 )
 from linebot.v3.webhooks import WebhookParser
 from linebot.v3.webhooks.models import (
