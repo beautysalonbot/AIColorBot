@@ -1,28 +1,25 @@
-# === imports ================================================================
+# === imports (SDK v3 & others) ==============================================
 from flask import Flask, request, abort
 from dotenv import load_dotenv
 from openai import OpenAI
+from linebot.v3.messaging import (
+    MessagingApi, Configuration,
+    ReplyMessageRequest, TextMessage, FlexMessage,
+    QuickReply, QuickReplyItem, MessageAction
+)
+from linebot.v3.messaging.models import (
+    FlexContainer, ImageComponent, BoxComponent, TextComponent
+)
+from linebot.v3.webhooks import WebhookParser
+from linebot.v3.webhooks.models import (
+    MessageEvent, TextMessageContent, ImageMessageContent
+)
+# ----------------------------------------------------------------------------
 import os, sys, traceback, cv2, numpy as np, pandas as pd
 from sklearn.neighbors import NearestNeighbors
 from collections import defaultdict
 
-from linebot.v3.webhooks import WebhookHandler
-from linebot.v3.webhooks.models import (
-    MessageEvent, TextMessageContent, ImageMessageContent
-)
-
-from linebot.v3.messaging import (
-    Configuration, MessagingApi,
-    ReplyMessageRequest, TextMessage, FlexMessage,
-    QuickReply, QuickReplyItem, MessageAction
-)
-
-from linebot.v3.messaging.models import (
-    BubbleContainer, Image, Box, Text, Carousel
-)
-# ============================================================================
-
-# === config & init ==========================================================
+# ---------- config & init ---------------------------------------------------
 load_dotenv()
 CHAN_SECRET = os.getenv("CHANNEL_SECRET")
 CHAN_TOKEN  = os.getenv("CHANNEL_ACCESS_TOKEN")
@@ -34,12 +31,12 @@ client = OpenAI(api_key=OPENAI_KEY)
 cfg    = Configuration(access_token=CHAN_TOKEN)
 api    = MessagingApi(cfg)
 app    = Flask(__name__)
-parser = WebhookHandler(CHAN_SECRET)
+parser = WebhookParser(CHAN_SECRET)
 
-# === kNN 下ごしらえ ========================================================
+# ---------- k‑NN 下ごしらえ -------------------------------------------------
 df  = pd.read_csv("recipes.csv")  # Name,L,a,b,formula,...
 knn = NearestNeighbors(n_neighbors=3).fit(df[["L", "a", "b"]].values)
-state = defaultdict(dict)  # user_id → {step,img,lv}
+state = defaultdict(dict)         # user_id → {step,img,lv}
 
 def extract_lab(b: bytes) -> np.ndarray:
     arr = np.frombuffer(b, np.uint8)
@@ -60,24 +57,25 @@ def gpt_comment(formula: str) -> str:
         traceback.print_exc()
         return "(解説取得エラー)"
 
-def bubble(rec) -> BubbleContainer:
-    return BubbleContainer(
-        hero=Image(
+def bubble(rec) -> FlexContainer:
+    return FlexContainer(
+        type="bubble",
+        hero=ImageComponent(
             url=f"{CHIP_BASE}/{rec.Name}.png",
             size="full", aspect_mode="cover", aspect_ratio="1:1"
         ),
-        body=Box(
+        body=BoxComponent(
             layout="vertical",
             spacing="sm",
             contents=[
-                Text(text=rec.Name, weight="bold", size="md"),
-                Text(text=rec.formula, wrap=True, size="sm"),
-                Text(text=gpt_comment(rec.formula), wrap=True, size="sm", color="#888")
+                TextComponent(text=rec.Name, weight="bold", size="md"),
+                TextComponent(text=rec.formula, wrap=True, size="sm"),
+                TextComponent(text=gpt_comment(rec.formula), wrap=True, size="sm", color="#888")
             ]
         )
     )
 
-# === Webhook =================================================================
+# =========================== Webhook ========================================
 @app.route("/callback", methods=["POST"])
 def callback():
     sig  = request.headers.get("X-Line-Signature", "")
@@ -90,7 +88,7 @@ def callback():
 
     for ev in events:
 
-        # ①画像受信時
+        # ---------- ① 画像 ----------
         if isinstance(ev, MessageEvent) and isinstance(ev.message, ImageMessageContent):
             img_bytes = api.get_message_content(ev.message.id)
             uid = ev.source.user_id
@@ -104,13 +102,13 @@ def callback():
             )
             return "OK", 200
 
-        # ②テキスト受信時
+        # ---------- ② テキスト ----------
         if isinstance(ev, MessageEvent) and isinstance(ev.message, TextMessageContent):
             txt = ev.message.text.strip()
             uid = ev.source.user_id
             st  = state.get(uid, {})
 
-            # 明度（LV）受付
+            # --- LV 受付 ---
             if st.get("step") == "ask_lv":
                 try:
                     lv = int(txt); assert 0 <= lv <= 19
@@ -143,7 +141,7 @@ def callback():
                 )
                 return "OK", 200
 
-            # 履歴（HIST）受信後の処理
+            # --- 履歴受信後、推論＋GPT ---
             if txt.startswith("HIST:") and st.get("step") == "ask_hist":
                 hist = txt.split(":")[1]
                 lv   = st["lv"]
@@ -153,7 +151,9 @@ def callback():
                               (df["formula"].str.contains("6%") & (hist == "S")) * 10
                 top3 = df.nsmallest(3, "score")
 
-                car = Carousel(contents=[bubble(r) for r in top3.itertuples()])
+                from linebot.v3.messaging.models import CarouselContainer
+                car = CarouselContainer(contents=[bubble(r) for r in top3.itertuples()])
+
                 api.reply_message(
                     ReplyMessageRequest(
                         reply_token=ev.reply_token,
@@ -164,12 +164,12 @@ def callback():
                 state.pop(uid, None)
                 return "OK", 200
 
-    return "OK", 200
+    return "OK", 200  # fallback
 
-# === Healthcheck for Render ==================================================
+# ---------- GET for healthcheck (Render) ------------------------------------
 @app.route("/callback", methods=["GET"])
 def health(): return "OK", 200
 
-# === Local run ===============================================================
+# -------------------------- local run ----------------------------------------
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", 5000)))
