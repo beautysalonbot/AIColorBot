@@ -1,32 +1,20 @@
-# === imports (SDK v3 & others) ==============================================
 from flask import Flask, request, abort
 from dotenv import load_dotenv
 from openai import OpenAI
-from linebot.v3.messaging import (
-    MessagingApi, Configuration,
-    ReplyMessageRequest, TextMessage, FlexMessage, MessageAction, QuickReply, QuickReplyItem
-)
-
-from linebot.v3.messaging import (
-    MessagingApi, Configuration,
-    ReplyMessageRequest, TextMessage, FlexMessage,
-    QuickReply, QuickReplyItem, MessageAction
-)
-
-from linebot.v3.messaging.models import (
-    FlexContainer, # ← 注意：BubbleContainer ではない
-    ImageComponent, BoxComponent, TextComponent
-)
-
-from linebot.v3.webhooks import WebhookHandler
-from linebot.v3.webhooks.models import (
-    MessageEvent, TextMessageContent, ImageMessageContent
-)
-# ----------------------------------------------------------------------------
 import os, sys, traceback, cv2, numpy as np, pandas as pd
 from sklearn.neighbors import NearestNeighbors
 from collections import defaultdict
-# ============================================================================
+
+from linebot.v3.webhook import WebhookParser
+from linebot.v3.messaging import (
+    Configuration, MessagingApi,
+    ReplyMessageRequest, TextMessage, FlexMessage,
+    QuickReply, QuickReplyItem, MessageAction,
+    Bubble, Image, Box, Text, Carousel
+)
+from linebot.v3.webhooks.models import (
+    MessageEvent, TextMessageContent, ImageMessageContent
+)
 
 # ---------- config & init ---------------------------------------------------
 load_dotenv()
@@ -36,16 +24,15 @@ OPENAI_KEY  = os.getenv("OPENAI_API_KEY")
 CHIP_BASE   = os.getenv("CHIP_BASE", "https://aic-olorbot-static.onrender.com")
 
 client = OpenAI(api_key=OPENAI_KEY)
-
 cfg    = Configuration(access_token=CHAN_TOKEN)
 api    = MessagingApi(cfg)
 app    = Flask(__name__)
-parser = WebhookHandler(CHAN_SECRET)
+parser = WebhookParser(CHAN_SECRET)
 
-# ---------- k‑NN 下ごしらえ -------------------------------------------------
+# ---------- k‑NN 準備 -------------------------------------------------------
 df  = pd.read_csv("recipes.csv")  # Name,L,a,b,formula,...
 knn = NearestNeighbors(n_neighbors=3).fit(df[["L", "a", "b"]].values)
-state = defaultdict(dict)         # user_id → {step,img,lv}
+state = defaultdict(dict)
 
 def extract_lab(b: bytes) -> np.ndarray:
     arr = np.frombuffer(b, np.uint8)
@@ -66,19 +53,19 @@ def gpt_comment(formula: str) -> str:
         traceback.print_exc()
         return "(解説取得エラー)"
 
-def bubble(rec) -> BubbleContainer:
-    return BubbleContainer(
-        hero=ImageComponent(
+def bubble(rec) -> Bubble:
+    return Bubble(
+        hero=Image(
             url=f"{CHIP_BASE}/{rec.Name}.png",
             size="full", aspect_mode="cover", aspect_ratio="1:1"
         ),
-        body=BoxComponent(
+        body=Box(
             layout="vertical",
             spacing="sm",
             contents=[
-                TextComponent(text=rec.Name, weight="bold", size="md"),
-                TextComponent(text=rec.formula, wrap=True, size="sm"),
-                TextComponent(text=gpt_comment(rec.formula), wrap=True, size="sm", color="#888")
+                Text(text=rec.Name, weight="bold", size="md"),
+                Text(text=rec.formula, wrap=True, size="sm"),
+                Text(text=gpt_comment(rec.formula), wrap=True, size="sm", color="#888")
             ]
         )
     )
@@ -96,9 +83,8 @@ def callback() -> tuple[str, int]:
 
     for ev in events:
 
-        # ---------- ① 画像 ----------
         if isinstance(ev, MessageEvent) and isinstance(ev.message, ImageMessageContent):
-            img_bytes = api.get_message_content(ev.message.id)   # v3: bytes
+            img_bytes = api.get_message_content(ev.message.id)
             uid = ev.source.user_id
             state[uid] = {"step": "ask_lv", "img": img_bytes}
 
@@ -110,17 +96,15 @@ def callback() -> tuple[str, int]:
             )
             return "OK", 200
 
-        # ---------- ② テキスト ----------
         if isinstance(ev, MessageEvent) and isinstance(ev.message, TextMessageContent):
             txt = ev.message.text.strip()
             uid = ev.source.user_id
             st  = state.get(uid, {})
 
-            # --- LV 受付 ---
             if st.get("step") == "ask_lv":
                 try:
                     lv = int(txt); assert 0 <= lv <= 19
-                except Exception:
+                except:
                     api.reply_message(
                         ReplyMessageRequest(
                             reply_token=ev.reply_token,
@@ -129,7 +113,7 @@ def callback() -> tuple[str, int]:
                     )
                     return "OK", 200
 
-                st["lv"]   = lv
+                st["lv"] = lv
                 st["step"] = "ask_hist"
 
                 qr = QuickReply(items=[
@@ -144,14 +128,11 @@ def callback() -> tuple[str, int]:
                 api.reply_message(
                     ReplyMessageRequest(
                         reply_token=ev.reply_token,
-                        messages=[
-                            TextMessage(text="ブリーチ・縮毛などの履歴を選んでね", quick_reply=qr)
-                        ]
+                        messages=[TextMessage(text="ブリーチ・縮毛などの履歴を選んでね", quick_reply=qr)]
                     )
                 )
                 return "OK", 200
 
-            # --- 履歴受信後、推論＋GPT ---
             if txt.startswith("HIST:") and st.get("step") == "ask_hist":
                 hist = txt.split(":")[1]
                 lv   = st["lv"]
@@ -161,7 +142,7 @@ def callback() -> tuple[str, int]:
                               (df["formula"].str.contains("6%") & (hist == "S")) * 10
                 top3 = df.nsmallest(3, "score")
 
-                car = CarouselContainer(contents=[bubble(r) for r in top3.itertuples()])
+                car = Carousel(contents=[bubble(r) for r in top3.itertuples()])
                 api.reply_message(
                     ReplyMessageRequest(
                         reply_token=ev.reply_token,
@@ -172,13 +153,10 @@ def callback() -> tuple[str, int]:
                 state.pop(uid, None)
                 return "OK", 200
 
-    return "OK", 200  # fallback
+    return "OK", 200
 
-# ---------- GET for healthcheck (Render) ------------------------------------
 @app.route("/callback", methods=["GET"])
 def health(): return "OK", 200
 
-# -------------------------- local run ----------------------------------------
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", 5000)))
-# ============================================================================
