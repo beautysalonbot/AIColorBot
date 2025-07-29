@@ -1,145 +1,161 @@
-# === app.py  (LINE SDK v3  + Flex Carousel) ==============================
-from __future__ import annotations
-import os, sys, traceback, cv2, numpy as np, pandas as pd
-from collections import defaultdict
+# === app.py 2025‑07‑29 (LINE SDK v3 ＆ bytes 修正版) ==========================
 from flask import Flask, request, abort
 from dotenv import load_dotenv
-from sklearn.neighbors import NearestNeighbors
 from openai import OpenAI
 
-# ---------- LINE v3 SDK ----------
-from linebot.v3.webhook import WebhookParser
+# --- LINE SDK v3 ------------------------------------------------------------
 from linebot.v3.messaging import (
-    Configuration, ApiClient, MessagingApi, MessagingApiBlob,
-    ReplyMessageRequest, TextMessage, FlexMessage
+    MessagingApi, Configuration,
+    QuickReply, QuickReplyItem, MessageAction,
+    FlexMessage, FlexContainer, Bubble, Carousel,
+    TextMessageContent, ImageMessageContent
 )
+from linebot.v3.webhook import WebhookParser, MessageEvent
 
-# ---------- 環境変数 ----------
+# --- そのほか ---------------------------------------------------------------
+import os, sys, traceback, cv2, numpy as np, pandas as pd
+from sklearn.neighbors import NearestNeighbors
+from collections import defaultdict
+# ===========================================================================
+
+# ---------- config & init ---------------------------------------------------
 load_dotenv()
-CHANNEL_SECRET = os.getenv("CHANNEL_SECRET")
-ACCESS_TOKEN   = os.getenv("CHANNEL_ACCESS_TOKEN")
-OPENAI_KEY     = os.getenv("OPENAI_API_KEY")
-CHIP_BASE      = os.getenv("CHIP_BASE", "https://aic-olorbot-static.onrender.com")
+CHAN_SECRET = os.getenv("CHANNEL_SECRET")
+CHAN_TOKEN  = os.getenv("CHANNEL_ACCESS_TOKEN")
+OPENAI_KEY  = os.getenv("OPENAI_API_KEY")
+CHIP_BASE   = os.getenv("CHIP_BASE", "https://aic-olorbot-static.onrender.com")
 
-# ---------- LINE クライアント ----------
-conf        = Configuration(access_token=ACCESS_TOKEN)
-api_client  = ApiClient(conf)
-msg_api     = MessagingApi(api_client)
-blob_api    = MessagingApiBlob(api_client)
-parser      = WebhookParser(CHANNEL_SECRET)
-
-# ---------- OpenAI ----------
 client = OpenAI(api_key=OPENAI_KEY)
 
-# ---------- レシピ k‑NN ----------
-df   = pd.read_csv("recipes.csv")
-knn  = NearestNeighbors(n_neighbors=3).fit(df[["L","a","b"]].values)
+cfg  = Configuration(access_token=CHAN_TOKEN)
+api  = MessagingApi(cfg)
+app  = Flask(__name__)
+parser = WebhookParser(CHAN_SECRET)
 
-user_state: dict[str,dict] = defaultdict(dict)   # user_id → {step,img,lv}
+# ---------- k‑NN 下ごしらえ -------------------------------------------------
+df = pd.read_csv("recipes.csv")             # Name,L,a,b,formula …
+knn = NearestNeighbors(n_neighbors=3).fit(df[["L","a","b"]].values)
 
-def extract_lab(img_bytes: bytes) -> np.ndarray:
-    img = cv2.imdecode(np.frombuffer(img_bytes, np.uint8), cv2.IMREAD_COLOR)
-    return cv2.cvtColor(img, cv2.COLOR_BGR2LAB).reshape(-1,3).mean(axis=0)
+state = defaultdict(dict)                   # user_id → {step,img,lv}
 
-def make_bubble(rec, comment: str) -> dict:
-    return {
-        "type":"bubble",
-        "hero":{
-            "type":"image",
-            "url":f"{CHIP_BASE}/{rec.Name}.png",
-            "size":"full","aspectRatio":"1:1","aspectMode":"cover"
-        },
-        "body":{
-            "type":"box","layout":"vertical","spacing":"sm",
-            "contents":[
-                {"type":"text","text":rec.Name,"weight":"bold","size":"md"},
-                {"type":"text","text":rec.formula,"wrap":True,"size":"sm"},
-                {"type":"text","text":comment,"wrap":True,"size":"sm","color":"#888"}
+def extract_lab(b: bytes) -> np.ndarray:
+    arr = np.frombuffer(b, np.uint8)
+    img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+    return cv2.cvtColor(img, cv2.COLOR_BGR2LAB).reshape(-1, 3).mean(0)
+
+def gpt_comment(formula: str) -> str:
+    prompt = (f"以下のヘアカラー処方を美容師らしく一言で解説して。\n"
+              f"処方: {formula}\n40文字以内、日本語。")
+    try:
+        rsp = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[{"role": "user", "content": prompt}],
+            max_tokens=60, temperature=0.7
+        )
+        return rsp.choices[0].message.content.strip()
+    except Exception as e:
+        print("GPT Error:", type(e).__name__, "-", e, file=sys.stderr)
+        traceback.print_exc()
+        return "(解説取得エラー)"
+
+def bubble(rec) -> Bubble:
+    return Bubble(
+        hero=ImageMessageContent(
+            url=f"{CHIP_BASE}/{rec.Name}.png",
+            size="full", aspect_mode="cover", aspect_ratio="1:1"
+        ),
+        body={
+            "type": "box",
+            "layout": "vertical",
+            "spacing": "sm",
+            "contents": [
+                {"type": "text", "text": rec.Name, "weight": "bold", "size": "md"},
+                {"type": "text", "text": rec.formula, "wrap": True, "size": "sm"},
+                {"type": "text", "text": gpt_comment(rec.formula),
+                 "wrap": True, "size": "sm", "color": "#888"}
             ]
         }
-    }
+    )
 
-# ---------- Flask ----------
-app = Flask(__name__)
-
+# =========================== Webhook ========================================
 @app.route("/callback", methods=["POST"])
-def callback() -> tuple[str,int]:
-    sig  = request.headers.get("X-Line-Signature","")
+def callback() -> tuple[str, int]:
+    sig  = request.headers.get("X-Line-Signature", "")
     body = request.get_data(as_text=True)
+
     try:
         events = parser.parse(body, sig)
     except Exception:
         abort(400)
 
     for ev in events:
-        # ① 画像を受信
-        if ev.message.type == "image":
+
+        # ---------- ① 画像 ----------
+        if isinstance(ev, MessageEvent) and isinstance(ev.message, ImageMessageContent):
+            img_bytes = api.get_message_content(ev.message.id)   # ← v3 は bytes
             uid = ev.source.user_id
-            content = blob_api.get_message_content(message_id=ev.message.id)
-            user_state[uid] = {"step":"ask_lv","img":content.body}
-            _reply(ev.reply_token, "現在の明度を 0〜19 の数字で送ってください📩")
-            return "OK",200
+            state[uid] = {"step": "ask_lv", "img": img_bytes}
 
-        # ② テキストを受信
-        if ev.message.type == "text":
-            uid  = ev.source.user_id
-            text = ev.message.text.strip()
-            st   = user_state.get(uid,{})
+            api.reply_message(
+                ev.reply_token,
+                TextMessageContent(text="現在の明度を 0〜19 の数字で送ってください📩")
+            )
+            return "OK", 200
 
-            # ---- 明度ステップ ----
-            if st.get("step")=="ask_lv":
+        # ---------- ② テキスト ----------
+        if isinstance(ev.message, TextMessageContent):
+            txt = ev.message.text.strip()
+            uid = ev.source.user_id
+            st  = state.get(uid, {})
+
+            # --- LV 受付 ---
+            if st.get("step") == "ask_lv":
                 try:
-                    lv=int(text); assert 0<=lv<=19
+                    lv = int(txt); assert 0 <= lv <= 19
                 except Exception:
-                    _reply(ev.reply_token,"0〜19 の数字で送ってね❗")
-                    return "OK",200
-                st.update(lv=lv, step="ask_hist")
-                _reply(ev.reply_token,"ブリーチ履歴を 0/1/2/S で返信してね (S=縮毛)")
-                return "OK",200
+                    api.reply_message(ev.reply_token,
+                        TextMessageContent(text="0〜19 の数字で送ってね❗"))
+                    return "OK", 200
 
-            # ---- 履歴ステップ ----
-            if text.startswith("HIST:") and st.get("step")=="ask_hist":
-                hist=text.split(":")[1]; lv=st["lv"]; lab=extract_lab(st["img"])
-                df["score"]=(df["L"]-lv*12).abs()*0.5 + (df["formula"].str.contains("6%")&(hist=="S"))*10
-                top3=df.nsmallest(3,"score")
+                st["lv"]   = lv
+                st["step"] = "ask_hist"
 
-                bubbles=[]
-                for r in top3.itertuples():
-                    # GPT で 40文字解説
-                    try:
-                        rsp = client.chat.completions.create(
-                            model="gpt-4o-mini",
-                            messages=[{"role":"user",
-                                       "content":f"以下のヘアカラー処方を美容師らしく一言で解説して。40文字以内、日本語。\n処方: {r.formula}"}],
-                            max_tokens=60,temperature=0.7)
-                        comment=rsp.choices[0].message.content.strip()
-                    except Exception as e:
-                        traceback.print_exc()
-                        comment="(解説取得エラー)"
-                    bubbles.append(make_bubble(r,comment))
+                qr = QuickReply(items=[
+                    QuickReplyItem(action=MessageAction(label="0回", text="HIST:0")),
+                    QuickReplyItem(action=MessageAction(label="1回", text="HIST:1")),
+                    QuickReplyItem(action=MessageAction(label="2回", text="HIST:2")),
+                    QuickReplyItem(action=MessageAction(label="3回以上", text="HIST:3")),
+                    QuickReplyItem(action=MessageAction(label="縮毛", text="HIST:S")),
+                    QuickReplyItem(action=MessageAction(label="パーマ", text="HIST:P")),
+                ])
+                api.reply_message(ev.reply_token,
+                    TextMessageContent(text="ブリーチ・縮毛などの履歴を選んでね", quick_reply=qr))
+                return "OK", 200
 
-                flex = FlexMessage(alt_text="おすすめレシピ",
-                                   contents={"type":"carousel","contents":bubbles})
-                msg_api.reply_message(ReplyMessageRequest(
-                    reply_token=ev.reply_token,
-                    messages=[flex]
-                ))
-                user_state.pop(uid,None)
-                return "OK",200
+            # --- 履歴を受信したら推論＋GPT ---
+            if txt.startswith("HIST:") and st.get("step") == "ask_hist":
+                hist = txt.split(":")[1]
+                lv   = st["lv"]
+                lab  = extract_lab(st["img"])
 
-    return "OK",200
+                df["score"] = (df["L"]-lv*12).abs()*0.5 + \
+                              (df["formula"].str.contains("6%") & (hist=="S"))*10
+                top3 = df.nsmallest(3, "score")
 
-# ---- LINE Verify 用 GET ----
-@app.route("/callback",methods=["GET"])
-def health(): return "OK",200
+                car = Carousel(contents=[bubble(r) for r in top3.itertuples()])
+                api.reply_message(ev.reply_token,
+                    FlexMessage(alt_text="おすすめレシピ", contents=car))
 
-def _reply(token:str, text:str):
-    msg_api.reply_message(ReplyMessageRequest(
-        reply_token=token,
-        messages=[TextMessage(text=text)]
-    ))
+                state.pop(uid, None)
+                return "OK", 200
 
-if __name__=="__main__":
-    port=int(os.environ.get("PORT",5000))
-    app.run(host="0.0.0.0",port=port)
-# ===================================================================
+    return "OK", 200   # fallback
+
+# ---------- GET for healthcheck (Render) ------------------------------------
+@app.route("/callback", methods=["GET"])
+def health(): return "OK", 200
+
+# -------------------------- local run ---------------------------------------
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=int(os.getenv("PORT", 5000)))
+# ============================================================================
