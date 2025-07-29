@@ -1,6 +1,6 @@
 aenum==3.1.16
 aiohappyeyeballs==2.6.1
-aiohttp==3.12.14
+aiohttp==3.8.5
 aiosignal==1.4.0
 annotated-types==0.7.0
 anyio==4.9.0
