@@ -1,17 +1,16 @@
-# === app.py 2025‑07‑29 (LINE SDK v3 ＆ bytes 修正版) ==========================
+# === imports (SDK v3) ==========================================
 from flask import Flask, request, abort
 from dotenv import load_dotenv
 from openai import OpenAI
-
-# --- LINE SDK v3 ------------------------------------------------------------
 from linebot.v3.messaging import (
     MessagingApi, Configuration,
-    QuickReply, QuickReplyItem, MessageAction,
-    FlexMessage, FlexContainer, Bubble, Carousel,
-    TextMessageContent, ImageMessageContent
+    ReplyMessageRequest,
+    TextMessage, QuickReply, QuickReplyItem, MessageAction,
+    FlexMessage, FlexBubble, FlexCarousel,
+    BoxComponent, TextComponent, ImageComponent
 )
-from linebot.v3.webhook import WebhookParser, MessageEvent
-
+from linebot.v3.webhooks import WebhookHandler
+# ---------------------------------------------------------------
 # --- そのほか ---------------------------------------------------------------
 import os, sys, traceback, cv2, numpy as np, pandas as pd
 from sklearn.neighbors import NearestNeighbors
