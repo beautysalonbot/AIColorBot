@@ -1,8 +1,11 @@
-# === imports (SDK v3) =====================================
 from flask import Flask, request, abort
 from dotenv import load_dotenv
+import os, sys, traceback, cv2, numpy as np, pandas as pd
+from sklearn.neighbors import NearestNeighbors
+from collections import defaultdict
 from openai import OpenAI
-from linebot.v3.webhooks import WebhookHandler, MessageEvent
+
+# LINE SDK v3 modules
 from linebot.v3.messaging import (
     MessagingApi, Configuration,
     ReplyMessageRequest, TextMessage,
@@ -13,38 +16,30 @@ from linebot.v3.messaging.models import (
     TextMessageContent, ImageMessageContent,
     Bubble, ImageComponent, BoxComponent, TextComponent
 )
-# ----------------------------------------------------------
-import os, sys, traceback, cv2, numpy as np, pandas as pd
-from sklearn.neighbors import NearestNeighbors
-from collections import defaultdict
-# ==========================================================
+from linebot.v3.webhooks import WebhookParser
+from linebot.v3.webhooks.models import MessageEvent
 
-# ---------- config & init ---------------------------------
+# ---------- config & init ----------
 load_dotenv()
-CHAN_SECRET = os.getenv("CHANNEL_SECRET")
-CHAN_TOKEN  = os.getenv("CHANNEL_ACCESS_TOKEN")
-OPENAI_KEY  = os.getenv("OPENAI_API_KEY")
-CHIP_BASE   = os.getenv("CHIP_BASE", "https://aic-olorbot-static.onrender.com")
+app = Flask(__name__)
+client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+parser = WebhookParser(channel_secret=os.getenv("CHANNEL_SECRET"))
+cfg = Configuration(access_token=os.getenv("CHANNEL_ACCESS_TOKEN"))
+api = MessagingApi(cfg)
+CHIP_BASE = os.getenv("CHIP_BASE", "https://aic-olorbot-static.onrender.com")
 
-client = OpenAI(api_key=OPENAI_KEY)
-cfg    = Configuration(access_token=CHAN_TOKEN)
-api    = MessagingApi(cfg)
-app    = Flask(__name__)
-handler = WebhookHandler(CHAN_SECRET)
-
-df = pd.read_csv("recipes.csv")  # Name,L,a,b,formula …
+df = pd.read_csv("recipes.csv")
 knn = NearestNeighbors(n_neighbors=3).fit(df[["L","a","b"]].values)
-state = defaultdict(dict)  # user_id → {step, img, lv}
+state = defaultdict(dict)
 
-# ---------- helper -----------------------------------------
+# ---------- helper ----------
 def extract_lab(b: bytes) -> np.ndarray:
     arr = np.frombuffer(b, np.uint8)
     img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
     return cv2.cvtColor(img, cv2.COLOR_BGR2LAB).reshape(-1, 3).mean(0)
 
 def gpt_comment(formula: str) -> str:
-    prompt = (f"以下のヘアカラー処方を美容師らしく一言で解説して。\n"
-              f"処方: {formula}\n40文字以内、日本語。")
+    prompt = f"以下のヘアカラー処方を美容師らしく一言で解説して。\n処方: {formula}\n40文字以内、日本語。"
     try:
         rsp = client.chat.completions.create(
             model="gpt-4o-mini",
@@ -53,8 +48,7 @@ def gpt_comment(formula: str) -> str:
         )
         return rsp.choices[0].message.content.strip()
     except Exception as e:
-        print("GPT Error:", type(e).__name__, "-", e, file=sys.stderr)
-        traceback.print_exc()
+        print("GPT Error:", e)
         return "(解説取得エラー)"
 
 def make_bubble(rec) -> Bubble:
@@ -75,35 +69,33 @@ def make_bubble(rec) -> Bubble:
         )
     )
 
-# ========================== Webhook ========================
+# ========== Webhook ==========
 @app.route("/callback", methods=["POST"])
 def callback():
     sig  = request.headers.get("X-Line-Signature", "")
     body = request.get_data(as_text=True)
 
     try:
-        events = handler.parse(body, sig)
+        events = parser.parse(body, sig)
     except Exception:
         abort(400)
 
     for ev in events:
-        # --- ① 画像受信 ---
+        # 画像
         if isinstance(ev, MessageEvent) and isinstance(ev.message, ImageMessageContent):
             uid = ev.source.user_id
             content = api.get_message_content(ev.message.id)
             state[uid] = {"step": "ask_lv", "img": content}
-
             msg = TextMessage(text="現在の明度を 0〜19 の数字で送ってください📩")
             api.reply_message(ReplyMessageRequest(reply_token=ev.reply_token, messages=[msg]))
             return "OK", 200
 
-        # --- ② テキスト処理 ---
+        # テキスト
         if isinstance(ev, MessageEvent) and isinstance(ev.message, TextMessageContent):
             txt = ev.message.text.strip()
             uid = ev.source.user_id
-            st  = state.get(uid, {})
+            st = state.get(uid, {})
 
-            # --- LV 受付 ---
             if st.get("step") == "ask_lv":
                 try:
                     lv = int(txt); assert 0 <= lv <= 19
@@ -127,29 +119,24 @@ def callback():
                 api.reply_message(ReplyMessageRequest(reply_token=ev.reply_token, messages=[msg]))
                 return "OK", 200
 
-            # --- 履歴受信 → 推論 ---
             if txt.startswith("HIST:") and st.get("step") == "ask_hist":
                 hist = txt.split(":")[1]
                 lv   = st["lv"]
                 lab  = extract_lab(st["img"])
-
                 df["score"] = (df["L"] - lv * 12).abs() * 0.5 + \
                               (df["formula"].str.contains("6%") & (hist == "S")) * 10
                 top3 = df.nsmallest(3, "score")
 
                 flex = FlexContainer(type="carousel", contents=[make_bubble(r) for r in top3.itertuples()])
-                flex_msg = FlexMessage(alt_text="おすすめレシピ", contents=flex)
-
-                api.reply_message(ReplyMessageRequest(reply_token=ev.reply_token, messages=[flex_msg]))
+                msg = FlexMessage(alt_text="おすすめレシピ", contents=flex)
+                api.reply_message(ReplyMessageRequest(reply_token=ev.reply_token, messages=[msg]))
                 state.pop(uid, None)
                 return "OK", 200
 
     return "OK", 200
 
-# ---------- Render healthcheck ----------
 @app.route("/callback", methods=["GET"])
 def health(): return "OK", 200
 
-# ---------- Local run -------------------
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", 5000)))
