@@ -7,7 +7,7 @@ from linebot.v3.messaging import (
     ReplyMessageRequest, TextMessage, FlexMessage,
     QuickReply, QuickReplyItem, MessageAction
 )
-from linebot.v3.messaging.models import (
+from linebot.v3.messaging.models.flex import (
     Image, Box, Text, Bubble, Carousel
 )
 from linebot.v3.webhooks import WebhookParser
@@ -74,6 +74,7 @@ def bubble(rec) -> Bubble:
     )
 
 # === Webhook ==============================================================
+
 @app.route("/callback", methods=["POST"])
 def callback():
     sig  = request.headers.get("X-Line-Signature", "")
