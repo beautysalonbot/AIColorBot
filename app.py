@@ -6,13 +6,15 @@ from linebot.v3.messaging import (
     MessagingApi, Configuration,
     ReplyMessageRequest, TextMessage, FlexMessage, MessageAction, QuickReply, QuickReplyItem
 )
+
 from linebot.v3.messaging.models import (
-    ImageMessageContent, TextMessageContent,
     FlexContainer, BubbleContainer, CarouselContainer,
     ImageComponent, BoxComponent, TextComponent
 )
+
 from linebot.v3.webhooks import WebhookHandler
-from linebot.v3.webhooks.models import MessageEvent
+from linebot.v3.webhooks.models import MessageEvent, TextMessageContent, ImageMessageContent
+
 # ----------------------------------------------------------------------------
 import os, sys, traceback, cv2, numpy as np, pandas as pd
 from sklearn.neighbors import NearestNeighbors
