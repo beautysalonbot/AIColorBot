@@ -7,20 +7,21 @@ from sklearn.neighbors import NearestNeighbors
 from collections import defaultdict
 
 # ---------- LINE SDK v3 imports ------------------------------------------
-from linebot.v3.messaging import (
-    Configuration,
-    MessagingApi,
-    ReplyMessageRequest,
-)
+from linebot.v3.messaging import Configuration, MessagingApi
 from linebot.v3.messaging.models import (
-    MessageEvent,
-    TextMessage,
-    ImageMessage,
+    ReplyMessageRequest,
+    TextMessage,                    # ← 送信用
+    FlexMessage,
     QuickReply, QuickReplyItem, MessageAction,
-    FlexMessage, BubbleContainer, CarouselContainer,
+    BubbleContainer, CarouselContainer,
     BoxComponent, TextComponent, ImageComponent,
 )
 from linebot.v3.webhooks import WebhookHandler
+from linebot.v3.webhooks.models import (          # ★ 受信用イベントはこちら
+    MessageEvent,
+    TextMessageContent,
+    ImageMessageContent,
+)
 # -------------------------------------------------------------------------
 
 # ───────── config & init ─────────────────────────────────────────────────
@@ -65,7 +66,6 @@ def gpt_comment(formula: str) -> str:
         return "(解説取得エラー)"
 
 def make_bubble(rec) -> BubbleContainer:
-    """recipes.csv の 1 行 (namedtuple) → Flex Bubble"""
     return BubbleContainer(
         hero=ImageComponent(
             url=f"{CHIP_BASE}/{rec.Name}.png",
@@ -108,11 +108,9 @@ def callback():
     for ev in events:
 
         # ---------- ① 画像 ----------
-        if isinstance(ev, MessageEvent) and isinstance(ev.message, ImageMessage):
-            # get_message_content は bytes を返します
-            img_bytes = api.get_message_content(ev.message.id)
-            if hasattr(img_bytes, "body"):        # ← Render では object.body
-                img_bytes = img_bytes.body
+        if isinstance(ev, MessageEvent) and isinstance(ev.message, ImageMessageContent):
+            img_obj = api.get_message_content(ev.message.id)   # bytesIO
+            img_bytes = img_obj.body if hasattr(img_obj, "body") else img_obj
             uid = ev.source.user_id
             state[uid] = {"step": "ask_lv", "img": img_bytes}
 
@@ -120,7 +118,7 @@ def callback():
             return "OK", 200
 
         # ---------- ② テキスト ----------
-        if isinstance(ev.message, TextMessage):
+        if isinstance(ev.message, TextMessageContent):
             txt  = ev.message.text.strip()
             uid  = ev.source.user_id
             info = state.get(uid, {})
@@ -160,7 +158,6 @@ def callback():
                 hist = txt.split(":", 1)[1]
                 lv   = info["lv"]
 
-                # k-NN スコア
                 df["score"] = (df["L"] - lv*12).abs()*0.5 + \
                               (df["formula"].str.contains("6%") & (hist == "S"))*10
                 top3 = df.nsmallest(3, "score")
