@@ -5,12 +5,14 @@ from openai import OpenAI
 from linebot.v3.messaging import (
     MessagingApi, Configuration, ReplyMessageRequest,
     TextMessage, QuickReply, QuickReplyItem, MessageAction,
-    FlexMessage, FlexContainer, BubbleContainer, CarouselContainer,
-    ImageComponent, BoxComponent, TextComponent
+    FlexMessage, ImageComponent, BoxComponent, TextComponent
 )
 from linebot.v3.webhooks import WebhookHandler
 from linebot.v3.webhooks.models import (
     MessageEvent, TextMessageContent, ImageMessageContent
+)
+from linebot.v3.messaging.models import (
+    BubbleContainer, CarouselContainer
 )
 
 # === その他ライブラリ ==========================================
@@ -78,7 +80,7 @@ def create_bubble(rec) -> BubbleContainer:
 # === Webhook (LINE 連携) ======================================
 @app.route("/callback", methods=["POST"])
 def callback():
-    signature = request.headers["X-Line-Signature"]
+    signature = request.headers.get("X-Line-Signature", "")
     body = request.get_data(as_text=True)
     try:
         events = handler.handle(body, signature)
@@ -96,12 +98,10 @@ def callback():
                 img_bytes = api.get_message_content(msg_id).body
                 state[uid] = {"step": "ask_lv", "img": img_bytes}
 
-                api.reply_message(
-                    ReplyMessageRequest(
-                        reply_token=event.reply_token,
-                        messages=[TextMessage(text="現在の明度を 0〜19 の数字で送ってください📩")]
-                    )
-                )
+                api.reply_message(ReplyMessageRequest(
+                    reply_token=event.reply_token,
+                    messages=[TextMessage(text="現在の明度を 0〜19 の数字で送ってください📩")]
+                ))
                 return "OK", 200
 
             # ② 明度（テキスト）受信
