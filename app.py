@@ -1,18 +1,18 @@
-# === app.py ── LINE SDK v3 + Flex (修正版) ===============================
+# === app.py ── LINE SDK v3 & Flex ========================================
 from flask import Flask, request, abort
 from dotenv import load_dotenv
-from openai import OpenAI
 import os, sys, traceback, cv2, numpy as np, pandas as pd
-from sklearn.neighbors import NearestNeighbors
 from collections import defaultdict
+from sklearn.neighbors import NearestNeighbors
+from openai import OpenAI
 
-# ---------- LINE SDK v3 --------------------------------------------------
+# ---------- LINE SDK v3 ---------------------------------------------------
 from linebot.v3.messaging import Configuration, MessagingApi
 from linebot.v3.messaging.models import (
     ReplyMessageRequest,
     TextMessage, QuickReply, QuickReplyItem, MessageAction,
     FlexMessage, FlexBubble, FlexCarousel,
-    BoxComponent, TextComponent, ImageComponent,
+    FlexBox,      FlexText,   FlexImage,
 )
 from linebot.v3.webhooks import WebhookHandler
 from linebot.v3.webhooks.models import (
@@ -20,9 +20,9 @@ from linebot.v3.webhooks.models import (
     TextMessageContent,
     ImageMessageContent,
 )
-# ------------------------------------------------------------------------
+# -------------------------------------------------------------------------
 
-# ---------- config & init -----------------------------------------------
+# ---------- config & init -------------------------------------------------
 load_dotenv()
 CHAN_SECRET = os.getenv("CHANNEL_SECRET")
 CHAN_TOKEN  = os.getenv("CHANNEL_ACCESS_TOKEN")
@@ -34,15 +34,14 @@ openai_client = OpenAI(api_key=OPENAI_KEY)
 cfg   = Configuration(access_token=CHAN_TOKEN)
 api   = MessagingApi(cfg)
 app   = Flask(__name__)
-parser = WebhookHandler(CHAN_SECRET)
+handler = WebhookHandler(CHAN_SECRET)
 
-# ---------- k‑NN ---------------------------------------------------------
+# ---------- k‑NN ----------------------------------------------------------
 df  = pd.read_csv("recipes.csv")                 # Name, L, a, b, formula …
 knn = NearestNeighbors(n_neighbors=3).fit(df[["L","a","b"]].values)
-
 state = defaultdict(dict)                        # user_id → {step,img,lv}
 
-# ---------- helpers ------------------------------------------------------
+# ---------- helpers -------------------------------------------------------
 def extract_lab(b: bytes) -> np.ndarray:
     arr = np.frombuffer(b, np.uint8)
     img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
@@ -64,34 +63,34 @@ def gpt_comment(formula: str) -> str:
 
 def make_bubble(rec) -> FlexBubble:
     return FlexBubble(
-        hero=ImageComponent(
+        hero=FlexImage(
             url=f"{CHIP_BASE}/{rec.Name}.png",
             size="full", aspect_mode="cover", aspect_ratio="1:1"
         ),
-        body=BoxComponent(
+        body=FlexBox(
             layout="vertical", spacing="sm",
             contents=[
-                TextComponent(text=rec.Name, weight="bold", size="md"),
-                TextComponent(text=rec.formula, size="sm", wrap=True),
-                TextComponent(text=gpt_comment(rec.formula),
-                              size="sm", color="#888888", wrap=True)
+                FlexText(text=rec.Name, weight="bold", size="md"),
+                FlexText(text=rec.formula, size="sm", wrap=True),
+                FlexText(text=gpt_comment(rec.formula),
+                         size="sm", color="#888888", wrap=True)
             ]
         )
     )
 
 def reply_text(token: str, text: str):
     api.reply_message(ReplyMessageRequest(
-        reply_token=token,
-        messages=[TextMessage(text=text)]
+        reply_token=token, messages=[TextMessage(text=text)]
     ))
 
-# =========================== Webhook =====================================
+# ========================== Webhook =======================================
 @app.route("/callback", methods=["POST"])
 def callback():
     signature = request.headers.get("X-Line-Signature", "")
     body      = request.get_data(as_text=True)
+
     try:
-        events = parser.parse(body, signature)
+        events = handler.parser.parse(body, signature)
     except Exception:
         abort(400)
 
@@ -115,7 +114,7 @@ def callback():
             # --- LV 受付 ---
             if info.get("step") == "ask_lv":
                 try:
-                    lv = int(txt);  assert 0<=lv<=19
+                    lv = int(txt);  assert 0 <= lv <= 19
                 except Exception:
                     reply_text(ev.reply_token, "0〜19 の数字で送ってね❗")
                     return "OK", 200
@@ -133,14 +132,11 @@ def callback():
                 ])
                 api.reply_message(ReplyMessageRequest(
                     reply_token=ev.reply_token,
-                    messages=[TextMessage(
-                        text="ブリーチ・縮毛などの履歴を選んでね",
-                        quick_reply=qr
-                    )]
+                    messages=[TextMessage(text="ブリーチ・縮毛などの履歴を選んでね", quick_reply=qr)]
                 ))
                 return "OK", 200
 
-            # --- 履歴を受信したら推論＋GPT -------------
+            # --- 履歴を受信したら推論＋GPT ---
             if txt.startswith("HIST:") and info.get("step") == "ask_hist":
                 hist = txt.split(":",1)[1]
                 lv   = info["lv"]
@@ -150,6 +146,7 @@ def callback():
                 top3 = df.nsmallest(3, "score")
 
                 carousel = FlexCarousel(contents=[make_bubble(r) for r in top3.itertuples()])
+
                 api.reply_message(ReplyMessageRequest(
                     reply_token=ev.reply_token,
                     messages=[FlexMessage(alt_text="おすすめレシピ", contents=carousel)]
@@ -161,10 +158,9 @@ def callback():
 
 # ---------- Render health-check ------------------------------------------
 @app.route("/callback", methods=["GET"])
-def health():
-    return "OK", 200
+def health(): return "OK", 200
 
-# ---------- local run ----------------------------------------------------
+# ---------------- local run ----------------------------------------------
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", 5000)))
-# ========================================================================
+# =========================================================================
