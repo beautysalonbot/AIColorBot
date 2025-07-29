@@ -1,4 +1,4 @@
-# === app.py ── LINE SDK v3 & Flex ========================================
+# === app.py (LINE SDK v3 完全対応版) =========================================
 from flask import Flask, request, abort
 from dotenv import load_dotenv
 import os, sys, traceback, cv2, numpy as np, pandas as pd
@@ -6,23 +6,20 @@ from collections import defaultdict
 from sklearn.neighbors import NearestNeighbors
 from openai import OpenAI
 
-# ---------- LINE SDK v3 ---------------------------------------------------
+# ---------- LINE SDK v3 -----------------------------------------------------
 from linebot.v3.messaging import Configuration, MessagingApi
 from linebot.v3.messaging.models import (
     ReplyMessageRequest,
     TextMessage, QuickReply, QuickReplyItem, MessageAction,
     FlexMessage, FlexBubble, FlexCarousel,
-    FlexBox,      FlexText,   FlexImage,
+    FlexBox, FlexText, FlexImage,
 )
-from linebot.v3.webhooks import WebhookHandler
 from linebot.v3.webhooks.models import (
-    MessageEvent,
-    TextMessageContent,
-    ImageMessageContent,
+    MessageEvent, TextMessageContent, ImageMessageContent,
 )
-# -------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
 
-# ---------- config & init -------------------------------------------------
+# ---------- config & init ---------------------------------------------------
 load_dotenv()
 CHAN_SECRET = os.getenv("CHANNEL_SECRET")
 CHAN_TOKEN  = os.getenv("CHANNEL_ACCESS_TOKEN")
@@ -34,14 +31,12 @@ openai_client = OpenAI(api_key=OPENAI_KEY)
 cfg   = Configuration(access_token=CHAN_TOKEN)
 api   = MessagingApi(cfg)
 app   = Flask(__name__)
-handler = WebhookHandler(CHAN_SECRET)
 
-# ---------- k‑NN ----------------------------------------------------------
 df  = pd.read_csv("recipes.csv")                 # Name, L, a, b, formula …
 knn = NearestNeighbors(n_neighbors=3).fit(df[["L","a","b"]].values)
 state = defaultdict(dict)                        # user_id → {step,img,lv}
 
-# ---------- helpers -------------------------------------------------------
+# ---------- helpers ----------------------------------------------------------
 def extract_lab(b: bytes) -> np.ndarray:
     arr = np.frombuffer(b, np.uint8)
     img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
@@ -83,14 +78,17 @@ def reply_text(token: str, text: str):
         reply_token=token, messages=[TextMessage(text=text)]
     ))
 
-# ========================== Webhook =======================================
+# =========================== Webhook ========================================
 @app.route("/callback", methods=["POST"])
 def callback():
     signature = request.headers.get("X-Line-Signature", "")
     body      = request.get_data(as_text=True)
 
+    # --- v3 SDK: 自前で JSON パース＆イベント取得 ---
+    from linebot.v3.webhooks import WebhookParser
+    parser = WebhookParser(CHAN_SECRET)
     try:
-        events = handler.parser.parse(body, signature)
+        events = parser.parse(body, signature)
     except Exception:
         abort(400)
 
@@ -163,4 +161,4 @@ def health(): return "OK", 200
 # ---------------- local run ----------------------------------------------
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", 5000)))
-# =========================================================================
+# ========================================================================
