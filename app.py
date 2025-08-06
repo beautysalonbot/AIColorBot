@@ -1,44 +1,48 @@
-# === imports (LINE SDK v3.3.0 & others) ======================================
+# === imports ================================================================
 from flask import Flask, request, abort
 from dotenv import load_dotenv
 from openai import OpenAI
+
+# LINE SDK 3.5.0 以降
 from linebot.v3.messaging import (
     Configuration, MessagingApi,
     ReplyMessageRequest, TextMessage, FlexMessage,
     QuickReply, QuickReplyItem, MessageAction
 )
 from linebot.v3.messaging.models import (
-    Image, Box, Text, Bubble, Carousel
+    ImageComponent, BoxComponent, TextComponent,
+    BubbleContainer, CarouselContainer
 )
 from linebot.v3.webhooks import WebhookHandler
-from linebot.v3.webhooks.models import (
-    MessageEvent, TextMessageContent, ImageMessageContent
-)
-# ----------------------------------------------------------------------------
-import os, sys, traceback, cv2, numpy as np, pandas as pd
-from sklearn.neighbors import NearestNeighbors
-from collections import defaultdict
+from linebot.v3.webhooks.models import MessageEvent, TextMessageContent, ImageMessageContent
 
-# === init ===================================================================
+# === misc libs =============================================================
+import os, sys, traceback, cv2, numpy as np, pandas as pd
+from collections import defaultdict
+from sklearn.neighbors import NearestNeighbors
+# ---------------------------------------------------------------------------
+
+# === init ==================================================================
 load_dotenv()
 CHAN_SECRET = os.getenv("CHANNEL_SECRET")
 CHAN_TOKEN  = os.getenv("CHANNEL_ACCESS_TOKEN")
 OPENAI_KEY  = os.getenv("OPENAI_API_KEY")
 CHIP_BASE   = os.getenv("CHIP_BASE", "https://aic-olorbot-static.onrender.com")
 
-client = OpenAI(api_key=OPENAI_KEY)
-cfg    = Configuration(access_token=CHAN_TOKEN)
-api    = MessagingApi(cfg)
-app    = Flask(__name__)
-handler = WebhookHandler(CHAN_SECRET)
+client   = OpenAI(api_key=OPENAI_KEY)
+cfg      = Configuration(access_token=CHAN_TOKEN)
+api      = MessagingApi(cfg)
+app      = Flask(__name__)
+handler  = WebhookHandler(CHAN_SECRET)
 
-# === kNN準備 ================================================================
-df  = pd.read_csv("recipes.csv")  # Name,L,a,b,formula,...
-knn = NearestNeighbors(n_neighbors=3).fit(df[["L", "a", "b"]].values)
-state = defaultdict(dict)
+# === k-NN set-up ============================================================
+df   = pd.read_csv("recipes.csv")  # Name,L,a,b,formula,…
+knn  = NearestNeighbors(n_neighbors=3).fit(df[["L", "a", "b"]].values)
+state = defaultdict(dict)          # user_id → {step,img,lv}
 
-def extract_lab(b: bytes) -> np.ndarray:
-    arr = np.frombuffer(b, np.uint8)
+# --- helpers ---------------------------------------------------------------
+def extract_lab(blob: bytes) -> np.ndarray:
+    arr = np.frombuffer(blob, np.uint8)
     img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
     return cv2.cvtColor(img, cv2.COLOR_BGR2LAB).reshape(-1, 3).mean(0)
 
@@ -48,13 +52,11 @@ def gpt_comment(formula: str) -> str:
         rsp = client.chat.completions.create(
             model="gpt-4o-mini",
             messages=[{"role": "user", "content": prompt}],
-            max_tokens=60,
-            temperature=0.7
+            max_tokens=60, temperature=0.7
         )
         return rsp.choices[0].message.content.strip()
     except Exception as e:
-        print("GPT Error:", type(e).__name__, "-", e, file=sys.stderr)
-        traceback.print_exc()
+        print("GPT Error:", e, file=sys.stderr)
         return "(解説取得エラー)"
 
 def bubble(rec) -> BubbleContainer:
@@ -74,53 +76,53 @@ def bubble(rec) -> BubbleContainer:
         )
     )
 
-# === Webhook ================================================================
+# === Webhook ===============================================================
 @app.route("/callback", methods=["POST"])
 def callback():
-    sig  = request.headers.get("X-Line-Signature", "")
-    body = request.get_data(as_text=True)
-
+    signature = request.headers.get("X-Line-Signature", "")
+    body      = request.get_data(as_text=True)
     try:
-        handler.handle(body, sig)
+        handler.handle(body, signature)
     except Exception as e:
-        print("Webhook Error:", e)
+        print("Webhook Error:", e, file=sys.stderr)
         abort(400)
-
     return "OK", 200
 
 @handler.add(MessageEvent)
-def handle_message(ev: MessageEvent):
-    if isinstance(ev.message, ImageMessageContent):
-        img_bytes = api.get_message_content(ev.message.id)
-        uid = ev.source.user_id
+def handle_message(event: MessageEvent):
+    # ① 画像を受信
+    if isinstance(event.message, ImageMessageContent):
+        img_bytes = api.get_message_content(event.message.id)
+        uid = event.source.user_id
         state[uid] = {"step": "ask_lv", "img": img_bytes}
 
         api.reply_message(
             ReplyMessageRequest(
-                reply_token=ev.reply_token,
+                reply_token=event.reply_token,
                 messages=[TextMessage(text="現在の明度を 0〜19 の数字で送ってください📩")]
             )
         )
 
-    elif isinstance(ev.message, TextMessageContent):
-        txt = ev.message.text.strip()
-        uid = ev.source.user_id
+    # ② テキストを受信
+    elif isinstance(event.message, TextMessageContent):
+        txt = event.message.text.strip()
+        uid = event.source.user_id
         st  = state.get(uid, {})
 
+        # --- LV 受付 ---
         if st.get("step") == "ask_lv":
             try:
                 lv = int(txt); assert 0 <= lv <= 19
             except Exception:
                 api.reply_message(
                     ReplyMessageRequest(
-                        reply_token=ev.reply_token,
+                        reply_token=event.reply_token,
                         messages=[TextMessage(text="0〜19 の数字で送ってね❗")]
                     )
                 )
                 return
 
-            st["lv"] = lv
-            st["step"] = "ask_hist"
+            st["lv"], st["step"] = lv, "ask_hist"
 
             qr = QuickReply(items=[
                 QuickReplyItem(action=MessageAction(label="0回", text="HIST:0")),
@@ -130,38 +132,35 @@ def handle_message(ev: MessageEvent):
                 QuickReplyItem(action=MessageAction(label="縮毛", text="HIST:S")),
                 QuickReplyItem(action=MessageAction(label="パーマ", text="HIST:P")),
             ])
-
             api.reply_message(
                 ReplyMessageRequest(
-                    reply_token=ev.reply_token,
+                    reply_token=event.reply_token,
                     messages=[TextMessage(text="ブリーチ・縮毛などの履歴を選んでね", quick_reply=qr)]
                 )
             )
 
+        # --- 履歴を受信 ⇒ 推論 + GPT ---
         elif txt.startswith("HIST:") and st.get("step") == "ask_hist":
             hist = txt.split(":")[1]
             lv   = st["lv"]
-            lab  = extract_lab(st["img"])
 
             df["score"] = (df["L"] - lv * 12).abs() * 0.5 + \
                           (df["formula"].str.contains("6%") & (hist == "S")) * 10
             top3 = df.nsmallest(3, "score")
 
-            car = CarouselContainer(contents=[bubble(r) for r in top3.itertuples()])
-
+            carousel = CarouselContainer(contents=[bubble(r) for r in top3.itertuples()])
             api.reply_message(
                 ReplyMessageRequest(
-                    reply_token=ev.reply_token,
-                    messages=[FlexMessage(alt_text="おすすめレシピ", contents=car)]
+                    reply_token=event.reply_token,
+                    messages=[FlexMessage(alt_text="おすすめレシピ", contents=carousel)]
                 )
             )
-
             state.pop(uid, None)
 
-# === GET for Render healthcheck =============================================
+# --- Render のヘルスチェック ----------------------------------------------
 @app.route("/callback", methods=["GET"])
 def health(): return "OK", 200
 
-# === local run ==============================================================
+# --- local -----------------------------------------------------------------
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", 5000)))
