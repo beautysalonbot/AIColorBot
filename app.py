@@ -8,7 +8,7 @@ from linebot.v3.messaging import (
     ReplyMessageRequest, TextMessage, FlexMessage,
     QuickReply, QuickReplyItem, MessageAction
 )
-from linebot.v3.webhooks import WebhookHandler
+from linebot.v3.webhook import WebhookHandler      # ← singular ＆ Handler をインポート
 from linebot.v3.webhooks.models import (
     MessageEvent, TextMessageContent, ImageMessageContent
 )
@@ -88,7 +88,9 @@ def callback():
     body = request.get_data(as_text=True)
     sig  = request.headers.get("X-Line-Signature", "")
     try:
-        handler.handle(body, sig)
+        events = parser.parse(body, sig)
+        for ev in events:
+            on_event(ev)          #  ← 先ほどの on_event をそのまま呼び出し
     except Exception as e:
         print("[Webhook Error]", e, file=sys.stderr); abort(400)
     return "OK", 200
