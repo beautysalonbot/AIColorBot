@@ -33,9 +33,9 @@ CHIP_BASE   = os.getenv("CHIP_BASE",
 # 2) SDK 初期化 --------------------------------------------------------------
 handler       = WebhookHandler(CHAN_SECRET)
 configuration = Configuration(access_token=CHAN_TOKEN)
-+api_client = ApiClient(configuration)
-+bot        = MessagingApi(api_client)         # メッセージ送信用
-+blob_api   = MessagingApiBlob(api_client)     # ★ BLOB（画像ダウンロード）用
+api_client = ApiClient(configuration)
+bot        = MessagingApi(api_client)         # メッセージ送信用
+blob_api   = MessagingApiBlob(api_client)     # ★ BLOB（画像ダウンロード）用
 client = OpenAI(api_key=OPENAI_KEY)
 app    = Flask(__name__)
 
