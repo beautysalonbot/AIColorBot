@@ -1,24 +1,26 @@
-# === imports ===============================================================
+# === imports ================================================================
 from flask import Flask, request, abort
 from dotenv import load_dotenv
 from openai import OpenAI
 
+from linebot.v3 import WebhookHandler, WebhookParser        # ★ここが正解
+from linebot.v3.exceptions import InvalidSignatureError
 from linebot.v3.messaging import (
-    Configuration, MessagingApi,
+    Configuration, ApiClient, MessagingApi,
     ReplyMessageRequest, TextMessage, FlexMessage,
     QuickReply, QuickReplyItem, MessageAction
 )
-from linebot.v3.webhook import WebhookHandler      # ← singular ＆ Handler をインポート
-from linebot.v3.webhooks.models import (
+from linebot.v3.webhooks import (
     MessageEvent, TextMessageContent, ImageMessageContent
 )
 
-# ─────────── other libs ───────────
+# ---- other libs ------------------------------------------------------------
 import os, sys, traceback, cv2, numpy as np, pandas as pd
 from sklearn.neighbors import NearestNeighbors
 from collections import defaultdict
-# ===========================================================================
-# 1. 環境変数
+# ============================================================================
+
+# 1) 環境変数 ----------------------------------------------------------------
 load_dotenv()
 CHAN_SECRET = os.getenv("CHANNEL_SECRET")
 CHAN_TOKEN  = os.getenv("CHANNEL_ACCESS_TOKEN")
@@ -26,19 +28,21 @@ OPENAI_KEY  = os.getenv("OPENAI_API_KEY")
 CHIP_BASE   = os.getenv("CHIP_BASE",
               "https://aic-olorbot-static.onrender.com")
 
-# 2. SDK instance
-client  = OpenAI(api_key=OPENAI_KEY)
-api_cfg = Configuration(access_token=CHAN_TOKEN)
-api     = MessagingApi(api_cfg)
-app     = Flask(__name__)
-handler = WebhookHandler(CHAN_SECRET)
+# 2) SDK 初期化 --------------------------------------------------------------
+handler       = WebhookHandler(CHAN_SECRET)
+configuration = Configuration(access_token=CHAN_TOKEN)
+api_client    = ApiClient(configuration)
+bot           = MessagingApi(api_client)      # ←以後 bot.* で呼び出し
 
-# 3. k-NN 下準備
-df   = pd.read_csv("recipes.csv")           # Name,L,a,b,formula,...
-knn  = NearestNeighbors(n_neighbors=3).fit(df[["L", "a", "b"]].values)
-state = defaultdict(dict)                   # user_id -> {step, lv, img}
+client = OpenAI(api_key=OPENAI_KEY)
+app    = Flask(__name__)
 
-# ─────────── util ───────────
+# 3) k-NN 下準備 -------------------------------------------------------------
+df    = pd.read_csv("recipes.csv")            # Name,L,a,b,formula,...
+knn   = NearestNeighbors(n_neighbors=3).fit(df[["L", "a", "b"]].values)
+state = defaultdict(dict)                     # user_id → {step, lv, img}
+
+# 4) ユーティリティ -----------------------------------------------------------
 def extract_lab(raw: bytes) -> np.ndarray:
     arr = np.frombuffer(raw, np.uint8)
     img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
@@ -59,7 +63,7 @@ def gpt_comment(formula: str) -> str:
         return "(解説取得エラー)"
 
 def bubble_dict(rec) -> dict:
-    """Flex Bubble を dict で返す（import 不要）"""
+    """Flex Bubble を純 JSON で作成（追加 import 不要）"""
     return {
         "type": "bubble",
         "hero": {
@@ -74,96 +78,113 @@ def bubble_dict(rec) -> dict:
             "layout": "vertical",
             "spacing": "sm",
             "contents": [
-                {"type": "text", "text": rec.Name,     "weight": "bold", "size": "md"},
-                {"type": "text", "text": rec.formula,  "wrap": True,     "size": "sm"},
+                {"type": "text", "text": rec.Name,    "weight": "bold", "size": "md"},
+                {"type": "text", "text": rec.formula, "wrap": True,     "size": "sm"},
                 {"type": "text", "text": gpt_comment(rec.formula),
                  "wrap": True, "size": "sm", "color": "#888"}
             ]
         }
     }
 
-# ─────────── webhook (Render も同じパス) ───────────
+# === Webhookエンドポイント ===================================================
 @app.route("/callback", methods=["POST"])
 def callback():
-    body = request.get_data(as_text=True)
-    sig  = request.headers.get("X-Line-Signature", "")
+    signature = request.headers.get("X-Line-Signature", "")
+    body      = request.get_data(as_text=True)
+
     try:
-        events = parser.parse(body, sig)
-        for ev in events:
-            on_event(ev)          #  ← 先ほどの on_event をそのまま呼び出し
+        handler.handle(body, signature)       # ← これが正式ルート
+    except InvalidSignatureError:
+        print("[Signature Error] channel secret/token 不一致", file=sys.stderr)
+        abort(400)
     except Exception as e:
-        print("[Webhook Error]", e, file=sys.stderr); abort(400)
+        print("[Webhook Error]", e, file=sys.stderr)
+        abort(400)
+
     return "OK", 200
 
-# メッセージハンドラ
-@handler.add(MessageEvent)
-def on_event(ev: MessageEvent):
-    uid = ev.source.user_id
+# === ハンドラ群 ==============================================================
+@handler.add(MessageEvent, message=ImageMessageContent)
+def handle_image(event: MessageEvent):
+    uid = event.source.user_id
+    raw = bot.get_message_content(event.message.id)
+    state[uid] = {"step": "ask_lv", "img": raw}
 
-    # ① 画像が来た
-    if isinstance(ev.message, ImageMessageContent):
-        raw = api.get_message_content(ev.message.id)
-        state[uid] = {"step": "ask_lv", "img": raw}
-        api.reply_message(ReplyMessageRequest(
-            reply_token=ev.reply_token,
+    bot.reply_message(
+        ReplyMessageRequest(
+            reply_token=event.reply_token,
             messages=[TextMessage(text="現在の明度を 0〜19 の数字で送ってください📩")]
-        ))
-        return
+        )
+    )
 
-    # ② テキストが来た
-    if not isinstance(ev.message, TextMessageContent):
-        return
-    txt = ev.message.text.strip()
-    st  = state.get(uid, {})
+@handler.add(MessageEvent, message=TextMessageContent)
+def handle_text(event: MessageEvent):
+    uid  = event.source.user_id
+    text = event.message.text.strip()
+    st   = state.get(uid, {})
 
-    # ---- 明度入力フェーズ ----
+    # --- 明度入力フェーズ ----------------------------------------------------
     if st.get("step") == "ask_lv":
         try:
-            lv = int(txt); assert 0 <= lv <= 19
+            lv = int(text); assert 0 <= lv <= 19
         except Exception:
-            api.reply_message(ReplyMessageRequest(
-                reply_token=ev.reply_token,
-                messages=[TextMessage(text="0〜19 の数字で送ってね❗")]
-            ))
+            bot.reply_message(
+                ReplyMessageRequest(
+                    reply_token=event.reply_token,
+                    messages=[TextMessage(text="0〜19 の数字で送ってね❗")]
+                )
+            )
             return
+
         st["lv"]   = lv
         st["step"] = "ask_hist"
+
         qr_items = [
             ("0回", "HIST:0"), ("1回", "HIST:1"), ("2回", "HIST:2"),
             ("3回以上", "HIST:3"), ("縮毛", "HIST:S"), ("パーマ", "HIST:P")
         ]
-        qr = QuickReply(items=[
+        quick = QuickReply(items=[
             QuickReplyItem(action=MessageAction(label=l, text=t))
             for l, t in qr_items
         ])
-        api.reply_message(ReplyMessageRequest(
-            reply_token=ev.reply_token,
-            messages=[TextMessage(text="ブリーチ・縮毛などの履歴を選んでね", quick_reply=qr)]
-        ))
+
+        bot.reply_message(
+            ReplyMessageRequest(
+                reply_token=event.reply_token,
+                messages=[TextMessage(text="ブリーチ・縮毛などの履歴を選んでね", quick_reply=quick)]
+            )
+        )
         return
 
-    # ---- 履歴受信後にレシピ算出 ----
-    if txt.startswith("HIST:") and st.get("step") == "ask_hist":
-        hist = txt.split(":")[1]; lv = st["lv"]
-        lab  = extract_lab(st["img"])  # ★今後：lab を使う場合
-        # スコア計算（一例）
+    # --- 履歴受領後のおすすめ ------------------------------------------------
+    if text.startswith("HIST:") and st.get("step") == "ask_hist":
+        hist = text.split(":")[1]
+        lv   = st["lv"]
+        lab  = extract_lab(st["img"])          # lab は今後に活用予定
+
+        # スコア計算例
         df["score"] = (df["L"] - lv * 12).abs() * 0.5 + \
                       (df["formula"].str.contains("6%") & (hist == "S")) * 10
         top3 = df.nsmallest(3, "score")
 
-        car = {"type": "carousel",
-               "contents": [bubble_dict(r) for r in top3.itertuples()]}
+        carousel = {
+            "type": "carousel",
+            "contents": [bubble_dict(r) for r in top3.itertuples()]
+        }
 
-        api.reply_message(ReplyMessageRequest(
-            reply_token=ev.reply_token,
-            messages=[FlexMessage(alt_text="おすすめレシピ", contents=car)]
-        ))
+        bot.reply_message(
+            ReplyMessageRequest(
+                reply_token=event.reply_token,
+                messages=[FlexMessage(alt_text="おすすめレシピ", contents=carousel)]
+            )
+        )
         state.pop(uid, None)
 
-# ─────────── health check (GET) ───────────
+# === Health check (Render) ===================================================
 @app.route("/callback", methods=["GET"])
-def health(): return "OK", 200
+def health():    # Render のヘルスチェック用
+    return "OK", 200
 
-# ─────────── local run ───────────
+# === Local run ===============================================================
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", 5000)))
