@@ -48,4 +48,11 @@ def gpt_comment(formula: str) -> str:
         rsp = client.chat.completions.create(
             model="gpt-4o-mini",
             messages=[{"role": "user", "content": prompt}],
-            max_tokens
+            max_tokens=60,
+            temperature=0.7
+        )
+        return rsp.choices[0].message.content.strip()
+    except Exception as e:
+        print("GPT Error:", type(e).__name__, "-", e, file=sys.stderr)
+        traceback.print_exc()
+        return "(解説取得エラー)" 
