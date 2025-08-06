@@ -7,13 +7,18 @@ from linebot.v3.messaging import (
     ReplyMessageRequest, TextMessage, FlexMessage,
     QuickReply, QuickReplyItem, MessageAction
 )
-from linebot.v3.messaging.models.flex import (
-    Image, Box, Text, Bubble, Carousel
+from linebot.v3.messaging.models import (
+    FlexBubble as Bubble,
+    FlexBox as Box,
+    FlexText as Text,
+    FlexImage as Image,
+    FlexCarousel as Carousel
 )
 from linebot.v3.webhooks import WebhookParser
 from linebot.v3.webhooks.models import (
     MessageEvent, TextMessageContent, ImageMessageContent
 )
+
 # ----------------------------------------------------------------------------
 import os, sys, traceback, cv2, numpy as np, pandas as pd
 from sklearn.neighbors import NearestNeighbors
