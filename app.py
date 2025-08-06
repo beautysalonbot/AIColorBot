@@ -1,29 +1,26 @@
+# === imports (LINE SDK v3.3.0 & others) ======================================
 from flask import Flask, request, abort
 from dotenv import load_dotenv
 from openai import OpenAI
 from linebot.v3.messaging import (
-    Configuration, MessagingApi, ReplyMessageRequest,
-    TextMessage, FlexMessage, QuickReply, QuickReplyItem, MessageAction
+    Configuration, MessagingApi,
+    ReplyMessageRequest, TextMessage, FlexMessage,
+    QuickReply, QuickReplyItem, MessageAction
 )
-from linebot.v3.webhooks import (
-    CallbackRequest, MessageEvent, TextMessageContent, ImageMessageContent
+from linebot.v3.messaging.models.flex import (
+    ImageComponent, BoxComponent, TextComponent,
+    BubbleContainer, CarouselContainer
 )
+from linebot.v3.webhooks import WebhookHandler
 from linebot.v3.webhooks.models import (
-    MessageEvent as EventMessageEvent,
-    TextMessageContent as EventTextMessageContent,
-    ImageMessageContent as EventImageMessageContent,
+    MessageEvent, TextMessageContent, ImageMessageContent
 )
-from linebot.v3.messaging.models import (
-    FlexContainer, BubbleContainer, CarouselContainer,
-    ImageComponent, BoxComponent, TextComponent
-)
-
+# ----------------------------------------------------------------------------
 import os, sys, traceback, cv2, numpy as np, pandas as pd
 from sklearn.neighbors import NearestNeighbors
 from collections import defaultdict
-import base64
 
-# === init ===
+# === init ===================================================================
 load_dotenv()
 CHAN_SECRET = os.getenv("CHANNEL_SECRET")
 CHAN_TOKEN  = os.getenv("CHANNEL_ACCESS_TOKEN")
@@ -34,17 +31,17 @@ client = OpenAI(api_key=OPENAI_KEY)
 cfg    = Configuration(access_token=CHAN_TOKEN)
 api    = MessagingApi(cfg)
 app    = Flask(__name__)
-state  = defaultdict(dict)
+handler = WebhookHandler(CHAN_SECRET)
 
-# === kNN 準備 ===
+# === kNN準備 ================================================================
 df  = pd.read_csv("recipes.csv")  # Name,L,a,b,formula,...
 knn = NearestNeighbors(n_neighbors=3).fit(df[["L", "a", "b"]].values)
+state = defaultdict(dict)
 
 def extract_lab(b: bytes) -> np.ndarray:
     arr = np.frombuffer(b, np.uint8)
     img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
-    lab = cv2.cvtColor(img, cv2.COLOR_BGR2LAB).reshape(-1, 3)
-    return lab.mean(0)
+    return cv2.cvtColor(img, cv2.COLOR_BGR2LAB).reshape(-1, 3).mean(0)
 
 def gpt_comment(formula: str) -> str:
     prompt = f"以下のヘアカラー処方を美容師らしく一言で解説して。\n処方: {formula}\n40文字以内、日本語。"
@@ -61,62 +58,111 @@ def gpt_comment(formula: str) -> str:
         traceback.print_exc()
         return "(解説取得エラー)"
 
+def bubble(rec) -> BubbleContainer:
+    return BubbleContainer(
+        hero=ImageComponent(
+            url=f"{CHIP_BASE}/{rec.Name}.png",
+            size="full", aspect_mode="cover", aspect_ratio="1:1"
+        ),
+        body=BoxComponent(
+            layout="vertical",
+            spacing="sm",
+            contents=[
+                TextComponent(text=rec.Name, weight="bold", size="md"),
+                TextComponent(text=rec.formula, wrap=True, size="sm"),
+                TextComponent(text=gpt_comment(rec.formula), wrap=True, size="sm", color="#888")
+            ]
+        )
+    )
+
+# === Webhook ================================================================
 @app.route("/callback", methods=["POST"])
 def callback():
+    sig  = request.headers.get("X-Line-Signature", "")
     body = request.get_data(as_text=True)
+
     try:
-        events = CallbackRequest.from_json(body).events
-        for event in events:
-            if isinstance(event, EventMessageEvent):
-                handle_event(event)
+        handler.handle(body, sig)
     except Exception as e:
-        print("Callback Error:", e, file=sys.stderr)
+        print("Webhook Error:", e)
+        abort(400)
+
     return "OK", 200
 
-def handle_event(event: EventMessageEvent):
-    msg = event.message
-    uid = event.source.user_id
-    if isinstance(msg, EventTextMessageContent):
-        text = msg.text.lower()
-        if "リセット" in text:
-            state[uid].clear()
-            reply(uid, "状態をリセットしました。")
-        else:
-            reply(uid, "画像を送ってください📷")
-    elif isinstance(msg, EventImageMessageContent):
-        try:
-            blob = api.get_message_content(msg.id)
-            b = b''.join(chunk for chunk in blob.iter_content(None))
-            lab = extract_lab(b)
-            dists, indices = knn.kneighbors([lab])
-            bubbles = []
-            for i in indices[0]:
-                row = df.iloc[i]
-                comment = gpt_comment(row["formula"])
-                bubbles.append(BubbleContainer(
-                    hero=ImageComponent(
-                        url=f"{CHIP_BASE}/chips/{row['Name']}.jpg",
-                        size="full", aspectRatio="1:1", aspectMode="cover"
-                    ),
-                    body=BoxComponent(
-                        layout="vertical",
-                        contents=[
-                            TextComponent(text=row["Name"], weight="bold", size="xl"),
-                            TextComponent(text=comment, wrap=True, margin="md", size="sm")
-                        ]
+@handler.add(MessageEvent)
+def handle_message(ev: MessageEvent):
+    if isinstance(ev.message, ImageMessageContent):
+        img_bytes = api.get_message_content(ev.message.id)
+        uid = ev.source.user_id
+        state[uid] = {"step": "ask_lv", "img": img_bytes}
+
+        api.reply_message(
+            ReplyMessageRequest(
+                reply_token=ev.reply_token,
+                messages=[TextMessage(text="現在の明度を 0〜19 の数字で送ってください📩")]
+            )
+        )
+
+    elif isinstance(ev.message, TextMessageContent):
+        txt = ev.message.text.strip()
+        uid = ev.source.user_id
+        st  = state.get(uid, {})
+
+        if st.get("step") == "ask_lv":
+            try:
+                lv = int(txt); assert 0 <= lv <= 19
+            except Exception:
+                api.reply_message(
+                    ReplyMessageRequest(
+                        reply_token=ev.reply_token,
+                        messages=[TextMessage(text="0〜19 の数字で送ってね❗")]
                     )
-                ))
-            carousel = CarouselContainer(contents=bubbles)
-            msg = FlexMessage(alt_text="おすすめレシピ", contents=carousel)
-            api.reply_message(ReplyMessageRequest(reply_token=event.reply_token, messages=[msg]))
-        except Exception as e:
-            traceback.print_exc()
-            reply(uid, "画像処理でエラーが起きました💥")
+                )
+                return
 
-def reply(user_id: str, text: str):
-    msg = TextMessage(text=text)
-    api.reply_message(ReplyMessageRequest(reply_token=user_id, messages=[msg]))
+            st["lv"] = lv
+            st["step"] = "ask_hist"
 
+            qr = QuickReply(items=[
+                QuickReplyItem(action=MessageAction(label="0回", text="HIST:0")),
+                QuickReplyItem(action=MessageAction(label="1回", text="HIST:1")),
+                QuickReplyItem(action=MessageAction(label="2回", text="HIST:2")),
+                QuickReplyItem(action=MessageAction(label="3回以上", text="HIST:3")),
+                QuickReplyItem(action=MessageAction(label="縮毛", text="HIST:S")),
+                QuickReplyItem(action=MessageAction(label="パーマ", text="HIST:P")),
+            ])
+
+            api.reply_message(
+                ReplyMessageRequest(
+                    reply_token=ev.reply_token,
+                    messages=[TextMessage(text="ブリーチ・縮毛などの履歴を選んでね", quick_reply=qr)]
+                )
+            )
+
+        elif txt.startswith("HIST:") and st.get("step") == "ask_hist":
+            hist = txt.split(":")[1]
+            lv   = st["lv"]
+            lab  = extract_lab(st["img"])
+
+            df["score"] = (df["L"] - lv * 12).abs() * 0.5 + \
+                          (df["formula"].str.contains("6%") & (hist == "S")) * 10
+            top3 = df.nsmallest(3, "score")
+
+            car = CarouselContainer(contents=[bubble(r) for r in top3.itertuples()])
+
+            api.reply_message(
+                ReplyMessageRequest(
+                    reply_token=ev.reply_token,
+                    messages=[FlexMessage(alt_text="おすすめレシピ", contents=car)]
+                )
+            )
+
+            state.pop(uid, None)
+
+# === GET for Render healthcheck =============================================
+@app.route("/callback", methods=["GET"])
+def health(): return "OK", 200
+
+# === local run ==============================================================
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 10000))
-    app.run(host="0.0.0.0", port=port)
+    app.run(host="0.0.0.0", port=int(os.getenv("PORT", 5000)))
