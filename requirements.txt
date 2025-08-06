@@ -1,4 +1,4 @@
-line-bot-sdk==3.5.0
+line-bot-sdk>=3.18.0   # “models.flex” ではなく JSON で組む方針に合わせ最新版
 Flask==3.1.1
 openai==1.97.1
 pandas
