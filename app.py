@@ -7,8 +7,7 @@ from linebot.v3 import WebhookHandler, WebhookParser        # ★ここが正解
 from linebot.v3.exceptions import InvalidSignatureError
 from linebot.v3.messaging import (
     Configuration, ApiClient,
-    MessagingApi,          # 返信など
-    MessagingApiBlob,      # ★ BLOB 用
+    MessagingApi, MessagingApiBlob,   # ★ 追加
     ReplyMessageRequest, TextMessage, FlexMessage,
     QuickReply, QuickReplyItem, MessageAction
 )
@@ -34,8 +33,8 @@ CHIP_BASE   = os.getenv("CHIP_BASE",
 handler       = WebhookHandler(CHAN_SECRET)
 configuration = Configuration(access_token=CHAN_TOKEN)
 api_client = ApiClient(configuration)
-bot        = MessagingApi(api_client)         # メッセージ送信用
-blob_api   = MessagingApiBlob(api_client)     # ★ BLOB（画像ダウンロード）用
+bot        = MessagingApi(api_client)
+blob_api   = MessagingApiBlob(api_client)  # ★ 追加
 client = OpenAI(api_key=OPENAI_KEY)
 app    = Flask(__name__)
 
@@ -109,10 +108,8 @@ def callback():
 @handler.add(MessageEvent, message=ImageMessageContent)
 def handle_image(event: MessageEvent):
     uid = event.source.user_id
-    # v3.18 ではストリームが返るので read() で bytes 化
-    raw = blob_api.get_message_content(event.message.id).read()
+    raw = blob_api.get_message_content(event.message.id)   # ★ ここを変更
     state[uid] = {"step": "ask_lv", "img": raw}
-
     bot.reply_message(
         ReplyMessageRequest(
             reply_token=event.reply_token,
